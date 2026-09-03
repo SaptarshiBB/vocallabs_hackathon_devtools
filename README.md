@@ -170,87 +170,158 @@ The project was collaboratively developed across 3 team members with evenly dist
 
 ### 1. Prerequisites
 
-- Python 3.10+ (tested on Python 3.11, 3.12, 3.13)
-- C/C++ compiler for Tree-sitter native grammar compilation:
-  - Linux (Arch btw): `sudo pacman -S base-devel python`
+- **Python 3.10+** (Python 3.11 recommended; CI runs on 3.11).
+- **Git** (with `core.longpaths=true` enabled on Windows).
+- **C/C++ compiler** (required for compiling native Tree-sitter C++ grammar):
+  - Linux (Arch): `sudo pacman -S base-devel python`
   - Linux (Debian/Ubuntu): `sudo apt-get update && sudo apt-get install -y build-essential gcc g++ python3-dev`
   - macOS: `xcode-select --install`
   - Windows: Visual Studio Build Tools (with C++ Desktop development) or MinGW GCC.
 
 ### 2. Installation
 
+Clone the repository and install dependencies inside a clean virtual environment:
+
 ```bash
+# Clone the repository
+git clone https://github.com/Mortoza-Morshed/vocallabs_hackathon_devtools.git
+cd vocallabs_hackathon_devtools
+
 # Create and activate virtual environment
 python -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-# Install dependencies
+# On Linux/macOS:
+source .venv/bin/activate
+
+# On Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+# On Windows (cmd.exe):
+.venv\Scripts\activate.bat
+
+# Install dependencies (requires py-tree-sitter >= 0.22)
 pip install -r requirements.txt
 ```
 
-### 3. Verify Tree-sitter Grammar
+### 3. Verify Tree-sitter C++ Grammar
 
-Verify that Tree-sitter C++ loads successfully into memory:
+Confirm that the Tree-sitter C++ parser initializes without error:
 
 ```bash
 python -c "import tree_sitter_cpp, tree_sitter; lang = tree_sitter.Language(tree_sitter_cpp.language()); parser = tree_sitter.Parser(lang); print('Tree-sitter C++ grammar loaded successfully!')"
 ```
 
-### 4. API Configuration (Optional)
+### 4. API Configuration (`.env` or Environment Variables)
 
-Blast Radius automatically selects available keys. If no key is set, it operates in Degraded Mode (static analysis only).
+Blast Radius uses `python-dotenv` to automatically load environment variables from a `.env` file in the project root. Missing keys are **not an error** — the pipeline gracefully defaults to static call-graph analysis labeled `DEGRADED MODE`.
 
-```bash
-# Google Gemini
-export GEMINI_API_KEY="..."
+Create or edit `.env` in the repository root:
 
-# Anthropic Claude
-export ANTHROPIC_API_KEY="..."
+```ini
+# Primary Model Keys (Anthropic Claude 3.5 Sonnet / 3 Haiku)
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
 
-# Nvidia NIM / Nemotron
-export NVIDIA_API_KEY="..."
+# Automatic Fallback 1: Google Gemini (Gemini 2.5 Flash via direct google-generativeai SDK)
+GEMINI_API_KEY=your_gemini_api_key_here
 
-# OpenAI
-export OPENAI_API_KEY="..."
+# Automatic Fallback 2: NVIDIA NIM (Meta Llama 3.3 70B Instruct via LiteLLM)
+NVIDIA_API_KEY=your_nvidia_nim_api_key_here
+# (Aliases NEMOTRON_API_KEY or NVIDIA_NIM_API_KEY are also recognized)
 
-# GitHub Token (optional, for higher rate limits in Web UI)
-export GITHUB_TOKEN="..."
+# Automatic Fallback 3: OpenAI (GPT-4o / GPT-4o-mini via LiteLLM)
+OPENAI_API_KEY=your_openai_api_key_here
+
+# Optional: GitHub Personal Access Token (for higher GitHub API limits and private repos in Web UI)
+GITHUB_TOKEN=your_github_token_here
 ```
+
+> **Dynamic Fallback Hierarchy:**
+> If a requested model (such as `claude-3-5-sonnet-20241022`) lacks an API key, Blast Radius automatically cascades to the next available provider:
+> **Anthropic ➔ Google Gemini (`gemini/gemini-2.5-flash`) ➔ NVIDIA NIM (`meta/llama-3.3-70b-instruct`) ➔ OpenAI (`gpt-4o`)**.
+> If no LLM keys are detected, the system safely operates in static-only **`DEGRADED MODE`**.
 
 ---
 
-## Usage Guide
+## How to Run
+
+> **Important**: Always execute commands from the **repository root directory** (`vocallabs_hackathon_devtools`) because internal modules import using absolute package roots (`core.*` and `observability.*`).
 
 ### 1. CLI Analysis
 
-Analyze a repository against a unified PR diff file:
+Analyze a target C++ repository clone against a unified PR diff file:
 
 ```bash
 python cli/blast_radius.py analyze <repo-path> <pr-diff-file>
 ```
+*(Or via the root shortcut: `python blast-radius.py analyze <repo-path> <pr-diff-file>`)*
 
-Optional CLI flags:
+**Example running on a built-in test case:**
+```bash
+python cli/blast_radius.py analyze eval/test_cases/case1_default_param_change/repo eval/test_cases/case1_default_param_change/pr.diff
+```
 
-- `--token-budget <int>`: Maximum token budget for context bundle (default: 8000).
-- `--confidence-threshold <int>`: Threshold for confirmed risk vs human review (default: 50).
-- `--risk-model <str>`: Primary model identifier (default: claude-3-5-sonnet-20241022).
-- `--crosscheck-model <str>`: Auditor model identifier (default: claude-3-haiku-20240307).
-- `--json`: Output raw JSON instead of the formatted terminal report.
-- `--log-file <path>`: Path for observability JSONL records (default: observability/logs.jsonl).
+**Available CLI Flags:**
+- `--token-budget <int>`: Max token budget for context bundle (default: `8000`).
+- `--confidence-threshold <int>`: Confidence threshold (0–100) below which risks flag as "NEEDS HUMAN REVIEW" (default: `50`).
+- `--risk-model <str>`: Primary risk model identifier (default: `claude-3-5-sonnet-20241022`, falls back automatically).
+- `--crosscheck-model <str>`: Secondary auditor model identifier (default: `claude-3-haiku-20240307`, falls back automatically).
+- `--json`: Output raw structured JSON format instead of human-readable terminal report.
+- `--log-file <path>`: Output destination for observability JSONL records (default: `observability/logs.jsonl`).
 
-### 2. Streamlit Web UI
+### 2. Interactive Web UI Dashboard (Streamlit)
 
-Launch the interactive browser dashboard:
+Launch the Streamlit web dashboard:
 
 ```bash
 streamlit run ui/app.py
 ```
 
-Paste any public GitHub PR URL (e.g. `https://github.com/owner/repo/pull/123`). The Web UI fetches the PR diff, clones the head commit into `.blast_radius/ui_clones/` (cached per PR), and displays interactive risk cards, confidence meters, and call-graph slices.
+- Open your browser at `http://localhost:8501`.
+- Enter any public GitHub PR URL (e.g., `https://github.com/owner/repo/pull/123`).
+- The UI fetches the diff via GitHub API, clones the PR head commit into `.blast_radius/ui_clones/<owner>-<repo>-<pr>/` (gitignored, cached across runs), runs the pipeline, and displays:
+  - **Reviewer Metric Cards**: Changed C++ Functions, Total Risks Detected, High-Severity Alerts, and Needs-Review Count.
+  - **Interactive Risk Cards**: Severity badges, confidence progress meters, crosscheck audit notes, and expandable technical reasoning.
+  - **Static 2-Hop Call Graph**: JSON visualizer for 1-hop and 2-hop caller/callee context slices.
+- Private repositories are supported when `GITHUB_TOKEN` is configured in `.env`.
 
-### 3. Standalone Component Execution
+### 3. Running Unit Tests
 
-Each component module can be run directly as a smoke test:
+Execute the full test suite with pytest:
+
+```bash
+python -m pytest tests/ -q
+```
+*(Or run with unittest: `python -m unittest discover -s tests -v`)*
+
+Covers:
+- `tests/test_diff_parser.py`: Tree-sitter diff line mapping to C++ functions.
+- `tests/test_callgraph.py`: 1-hop and 2-hop caller/callee static traversal.
+- `tests/test_confidence.py`: Calibrated confidence scoring and human review flagging.
+- `tests/test_degrade_simulated.py`: Zero-crash degraded mode fallback under simulated API timeouts and HTTP 429 rate limits.
+
+### 4. Running the Benchmark Evaluation Suite (10 Cases)
+
+Blast Radius includes a comprehensive 10-scenario C++ evaluation suite in `eval/test_cases/`:
+
+- **Offline / Mock Mode** (Default — structural verification, runs offline without LLM API calls):
+  ```bash
+  python -m eval.eval_harness
+  ```
+  *(Derives risks from `ground_truth.json`; metrics are structural only).*
+
+- **Live LLM Evaluation Mode** (Calls live models, consumes tokens, and evaluates real Precision, Recall, and F1 Score):
+  ```bash
+  python -m eval.eval_harness --live
+  ```
+  *(Requires at least one configured LLM key in `.env`).*
+
+- **Regenerate Benchmark Suite** (Regenerates all 10 synthetic C++ test cases in `eval/test_cases/`):
+  ```bash
+  python -m eval.generate_eval_suite
+  ```
+
+### 5. Standalone Module Smoke Tests
+
+Modules without dedicated pytest files include standalone `__main__` test blocks. Run any module directly:
 
 ```bash
 python -m core.diff_parser
@@ -262,6 +333,7 @@ python -m core.confidence
 python -m core.degrade
 python -m observability.cost_latency_log
 ```
+*(Smoke tests automatically create and clean up temporary `scratch_test/` directories).*
 
 ---
 
@@ -315,7 +387,11 @@ TOTAL              | 2 calls                      | 2130            |   24.93s |
 Run the benchmark across 10 labeled C++ scenarios:
 
 ```bash
-python eval/eval_harness.py
+# Offline Mock Mode (default, zero token cost):
+python -m eval.eval_harness
+
+# Live LLM Mode (calls real models, evaluates real precision/recall/F1):
+python -m eval.eval_harness --live
 ```
 
 ```text
@@ -343,7 +419,8 @@ Precision: 1.0000 | Recall: 1.0000 | F1 Score: 1.0000
 Execute the deterministic test suite:
 
 ```bash
-python -m unittest discover -s tests -v
+python -m pytest tests/ -q
+# (or with verbose output: python -m unittest discover -s tests -v)
 ```
 
 ```text
