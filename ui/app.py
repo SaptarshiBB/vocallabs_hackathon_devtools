@@ -83,7 +83,7 @@ def fetch_pr(owner: str, repo: str, number: int) -> dict:
 
 def _run_git(args, cwd=None):
     proc = subprocess.run(
-        ["git"] + args,
+        ["git", "-c", "core.longpaths=true"] + args,
         cwd=str(cwd) if cwd else None,
         capture_output=True,
         text=True,
@@ -155,73 +155,91 @@ def run_pipeline(repo_dir: Path, diff_text: str, token_budget: int, confidence_t
 def render_report(report: dict):
     pr = report["pr"]
     result = report["result"]
-    logs = report["log_records"]
 
     st.subheader(f"PR #{report['number']}: {pr['title']}")
     st.caption(f"`{report['owner']}/{report['repo']}` · {pr['base_ref']} ← {pr['head_ref']} · head `{pr['head_sha'][:8]}` · state: {pr['state']}")
 
     if result.get("is_degraded"):
-        st.error(f"**{result.get('degraded_label')}**\n\n{result.get('degraded_reason', '')}")
+        st.warning(f"**{result.get('degraded_label')}**\n\n{result.get('degraded_reason', '')}")
 
     risks = result.get("risks", [])
+    changed_funcs = result.get("changed_functions", [])
+    
+    high_sev_count = sum(1 for r in risks if str(r.get("severity", "")).lower() == "high")
+    needs_review_count = sum(1 for r in risks if "NEEDS HUMAN REVIEW" in str(r.get("status", "")).upper() or int(r.get("confidence_score", 0)) < 50)
+
+    # Key Reviewer Metrics
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Changed C++ functions", len(result.get("changed_functions", [])))
-    c2.metric("Risks detected", len(risks))
-    c3.metric("Estimated cost", f"${result.get('cost_usd', 0.0):.5f}")
-    c4.metric("LLM latency", f"{result.get('latency_seconds', 0.0):.2f}s")
+    c1.metric("Changed C++ Functions", len(changed_funcs))
+    c2.metric("Total Risks Detected", len(risks))
+    c3.metric("High Severity Risks", high_sev_count)
+    c4.metric("Needs Human Review", needs_review_count)
 
-    model_info = result.get("model_info") or {}
-    if any(v and "degraded" not in v for v in model_info.values()):
-        st.caption(f"Models used: risk=`{model_info.get('risk_model')}` · crosscheck=`{model_info.get('crosscheck_model')}`")
+    st.divider()
 
-    if not result.get("changed_functions"):
+    if not changed_funcs:
         st.info("No modified C++ functions detected in this diff (nothing to analyze).")
     elif not risks:
-        st.success("No downstream behavioral contract breakages detected.")
+        st.success("✅ **PR Passed Semantic Check**: No downstream behavioral contract breakages detected.")
+    else:
+        if high_sev_count > 0:
+            st.error("🚨 **Critical Action Required**: High-severity semantic risk or contract violation detected!")
+        elif needs_review_count > 0:
+            st.warning("⚠️ **Review Required**: Potential risks detected that require manual developer verification.")
 
-    for idx, r in enumerate(risks, 1):
-        sev = str(r.get("severity", "medium")).lower()
-        box = {"high": st.error, "medium": st.warning}.get(sev, st.info)
-        with box(f"Risk #{idx} · [{sev.upper()} SEVERITY] · {r.get('status', '')}"):
-            st.markdown(f"**{r.get('description', '')}**")
-            st.caption(f"Affected component: `{r.get('affected_function', 'unknown')}`")
-            st.progress(min(100, int(r.get("confidence_score", 0))) / 100.0, text=f"Confidence: {r.get('confidence_score', 0)}/100")
-            cc_status = str(r.get("crosscheck_status", "unverified")).upper()
-            note = r.get("crosscheck_note", "")
-            st.caption(f"Crosscheck audit: **{cc_status}**" + (f" — {note}" if note else ""))
-            with st.expander("Technical reasoning"):
-                st.write(r.get("reasoning", ""))
+    if changed_funcs:
+        with st.expander("📄 Modified C++ Functions Detected", expanded=True):
+            for cf in changed_funcs:
+                func_name = cf.get("name", cf) if isinstance(cf, dict) else getattr(cf, "name", str(cf))
+                func_file = cf.get("filepath", "") if isinstance(cf, dict) else getattr(cf, "filepath", "")
+                start_l = cf.get("start_line", "") if isinstance(cf, dict) else getattr(cf, "start_line", "")
+                end_l = cf.get("end_line", "") if isinstance(cf, dict) else getattr(cf, "end_line", "")
+                loc_str = f" `{func_file}:{start_l}-{end_l}`" if func_file else ""
+                st.markdown(f"• **`{func_name}`**{loc_str}")
 
-    if logs:
-        with st.expander("Observability (per LLM call)"):
-            st.dataframe(logs, use_container_width=True)
-    with st.expander("Callgraph slices"):
+    if risks:
+        st.markdown("### ⚠️ Downstream Risks & Behavioral Contract Violations")
+        for idx, r in enumerate(risks, 1):
+            sev = str(r.get("severity", "medium")).lower()
+            box = {"high": st.error, "medium": st.warning}.get(sev, st.info)
+            status_text = r.get("status", "")
+            with box(f"Risk #{idx} · [{sev.upper()} SEVERITY] · {status_text}"):
+                st.markdown(f"**{r.get('description', '')}**")
+                st.markdown(f"**Affected Component**: `{r.get('affected_function', 'unknown')}`")
+                st.progress(min(100, int(r.get("confidence_score", 0))) / 100.0, text=f"Confidence: {r.get('confidence_score', 0)}/100")
+                
+                cc_status = str(r.get("crosscheck_status", "verified")).upper()
+                note = r.get("crosscheck_note", "")
+                if note:
+                    st.caption(f"Audit Note: {note}")
+                
+                with st.expander("Technical Reasoning & Contract Breakdown"):
+                    st.write(r.get("reasoning", ""))
+
+    with st.expander("🔍 Static 2-Hop Call Graph Context Slices"):
         st.json(result.get("callgraph_slices", []))
-    with st.expander("Raw JSON output"):
-        st.json(result)
 
 
 st.set_page_config(page_title="Blast Radius", page_icon="💥", layout="wide")
 st.title("💥 Blast Radius — C++ PR Semantic Risk Analyzer")
 
 with st.sidebar:
-    st.header("Analysis settings")
+    st.header("Analysis Settings")
     pr_url = st.text_input("GitHub Pull Request URL", placeholder="https://github.com/owner/repo/pull/123")
-    token_budget = st.slider("Token budget", 2000, 32000, 8000, step=1000)
-    confidence_threshold = st.slider("Confidence threshold", 0, 100, 50)
+    token_budget = st.slider("Token Budget", 2000, 32000, 8000, step=1000)
+    confidence_threshold = st.slider("Confidence Threshold", 0, 100, 50)
     analyze_clicked = st.button("Analyze PR", type="primary", disabled=not pr_url.strip())
 
-    if st.button("Clear clone cache"):
+    if st.button("Clear Clone Cache"):
         shutil.rmtree(CLONE_ROOT, ignore_errors=True)
         st.success("Clone cache cleared.")
 
     st.divider()
     active_keys = [k for k in LLM_KEY_VARS if os.environ.get(k)]
     if active_keys:
-        st.success(f"LLM key detected: `{active_keys[0]}`")
+        st.caption("🔒 **Semantic Analysis Engine Ready**")
     else:
-        st.warning("No LLM API key found in env/.env — analysis will run in **DEGRADED MODE** (static callgraph only). Uncomment a key in `.env` for full semantic analysis.")
-    st.caption("Public repos only. Set `GITHUB_TOKEN` in `.env` for higher rate limits.")
+        st.warning("Running in **Static Mode** (callgraph only). Configure an API key in `.env` for semantic risk checks.")
 
 if analyze_clicked:
     try:

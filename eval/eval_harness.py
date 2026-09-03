@@ -13,6 +13,9 @@ import glob
 from dataclasses import dataclass
 from typing import List, Dict, Any, Tuple
 
+from dotenv import load_dotenv
+load_dotenv()
+
 # Ensure project root is in sys.path
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -118,9 +121,12 @@ def run_pipeline_for_case(case_dir: str, use_mock_if_offline: bool = True) -> Di
         }
 
 
-def evaluate_benchmark(test_cases_dir: str = "eval/test_cases") -> EvalMetrics:
+def evaluate_benchmark(test_cases_dir: str = "eval/test_cases", use_live: bool = False) -> EvalMetrics:
     """
     Evaluates all labeled benchmark cases under test_cases_dir.
+    Default (use_live=False) runs the mocked pipeline whose risks are derived from
+    ground_truth.json, so metrics are structural only. use_live=True invokes the
+    real LLM pipeline and requires at least one API key in env/.env.
     """
     case_dirs = [d for d in glob.glob(os.path.join(test_cases_dir, "*")) if os.path.isdir(d)]
     case_dirs.sort()
@@ -141,7 +147,7 @@ def evaluate_benchmark(test_cases_dir: str = "eval/test_cases") -> EvalMetrics:
                 gt_data = json.load(f)
                 has_gt_regression = gt_data.get("has_contract_break", gt_data.get("has_regression", False))
 
-        pipeline_out = run_pipeline_for_case(cdir)
+        pipeline_out = run_pipeline_for_case(cdir, use_mock_if_offline=not use_live)
         predicted_risks = [r for r in pipeline_out.get("risks", []) if r.get("confidence_score", 0) >= 50]
         has_pred_regression = len(predicted_risks) > 0
 
@@ -185,8 +191,17 @@ def evaluate_benchmark(test_cases_dir: str = "eval/test_cases") -> EvalMetrics:
 
 
 if __name__ == "__main__":
+    live = "--live" in sys.argv
+    api_available = any(k in os.environ for k in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY", "NVIDIA_API_KEY", "NEMOTRON_API_KEY", "NVIDIA_NIM_API_KEY"))
+    if live:
+        if not api_available:
+            print("[!] --live requested but no LLM API key found in env/.env (ANTHROPIC_API_KEY / GEMINI_API_KEY / OPENAI_API_KEY / NVIDIA_API_KEY / NEMOTRON_API_KEY / NVIDIA_NIM_API_KEY).")
+            sys.exit(1)
+        print("[+] LIVE LLM MODE: benchmark will call real models (costs tokens).")
+    else:
+        print("[+] MOCK MODE: risks are derived from ground_truth.json; metrics are structural only. Use --live with an API key for real model metrics.")
     print("[+] Testing eval/eval_harness.py standalone...")
-    metrics = evaluate_benchmark("eval/test_cases")
+    metrics = evaluate_benchmark("eval/test_cases", use_live=live)
     assert metrics.total_cases >= 2
     assert metrics.f1_score > 0.0
     print("[+] eval/eval_harness.py tests completed successfully!")
